@@ -1,0 +1,19 @@
+Hexa 웹 서버 올리기 (GitHub + Render)
+
+1) 이 폴더의 파일을 모두 GitHub 저장소 맨 위에 올린다 (폴더 없이 파일만).
+2) 계정 저장용 무료 DB 만들기 (Neon)
+   - https://neon.tech 가입 → New Project → 만들어지면 Connection string 복사
+     (postgresql://...neon.tech/neondb?sslmode=require 모양)
+3) Render 서비스 → Environment → Add Environment Variable
+   - Key: DATABASE_URL   Value: 2)에서 복사한 주소 → Save (자동으로 다시 배포)
+   - DB를 안 붙이면 Render 무료 서버가 잠들었다 깰 때마다 계정과 랭크가 지워진다.
+4) Render Settings: Build Command = npm install, Start Command = npm start
+5) 배포 뒤 https://<서비스이름>.onrender.com/api/status 를 열어
+   "storage":"postgres" 가 보이면 DB 연결 성공.
+
+안드로이드
+- 바로 쓰기: 폰 크롬으로 사이트 열기 → 메뉴(⋮) → "앱 설치" 또는 "홈 화면에 추가"
+- APK 만들기: https://www.pwabuilder.com 에 사이트 주소 입력 → Package For Stores → Android
+  → 받은 zip 안의 APK를 폰에 설치(또는 AAB를 Play 콘솔에 올림)
+  → zip 안의 assetlinks.json 내용을 Render 환경 변수 ASSETLINKS_JSON 에 붙여 넣거나,
+    assetlinks.json 파일을 이 폴더(index.html 옆)에 올리면 앱에서 주소창이 사라진다.

@@ -1,12 +1,13 @@
-// 육각 전장 웹 서버: 빌드된 게임 페이지를 내주고, 멀티플레이 방(로비·방·presence·메시지)을 중계한다.
+// Hexa 웹 서버: 게임 페이지(설치형 웹앱 파일 포함)를 내주고, 계정·랭크를 저장하고, 멀티플레이 방을 중계한다.
 // 게임 판은 방장 브라우저가 돌리고, 이 서버는 메시지만 나른다 (claude.ai의 room과 같은 모양).
-//   node server.mjs            (PORT 환경변수, 기본 8080)
+//   node server.mjs            (PORT 기본 8080, DATABASE_URL이 있으면 Postgres에 저장, 없으면 data/hexa-db.json)
 import { createServer } from 'node:http';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { WebSocketServer } from 'ws';
+import { accountsApi, openStore } from './accounts.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 // 게임 페이지 위치: 배포용 묶음(server.mjs 옆 index.html 또는 public/index.html), 저장소 안 빌드 결과(apps/client/dist)
@@ -19,11 +20,48 @@ const MAX_PRESENCE = 8 * 1024;
 const CH_RE = /^(lobby|hw-[a-z0-9]{4,10})$/;
 const TOPIC_RE = /^[a-z][a-z0-9_.-]{0,47}$/;
 
-const server = createServer((req, res) => {
+const store = await openStore(here);
+const api = accountsApi(store);
+if (store.kind === 'file' && process.env.RENDER) console.warn('경고: DATABASE_URL이 없어 계정을 파일에 저장한다. Render 무료 서버는 다시 시작할 때 파일이 지워지니 Postgres(DATABASE_URL)를 연결하자.');
+
+// 설치형 웹앱(안드로이드 홈 화면·앱 포장)에 필요한 파일: index.html과 같은 폴더에서 찾는다
+const STATIC = {
+  '/manifest.webmanifest': 'application/manifest+json',
+  '/sw.js': 'text/javascript; charset=utf-8',
+  '/icon-192.png': 'image/png',
+  '/icon-512.png': 'image/png',
+  '/icon-maskable-512.png': 'image/png',
+  '/apple-touch-icon.png': 'image/png',
+};
+
+const server = createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://x');
   if (url.pathname === '/health') {
     res.writeHead(200, { 'content-type': 'text/plain' });
     return res.end('ok');
+  }
+  if (await api(req, res, url)) return;
+  if (url.pathname === '/.well-known/assetlinks.json') {
+    // 안드로이드 앱(TWA)이 이 사이트를 주소창 없이 열 수 있게 하는 인증 파일
+    const page = findPage();
+    const file = page ? join(dirname(page), 'assetlinks.json') : '';
+    const body = process.env.ASSETLINKS_JSON || (file && existsSync(file) ? readFileSync(file, 'utf8') : null);
+    if (!body) {
+      res.writeHead(404);
+      return res.end('not found');
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(body);
+  }
+  if (STATIC[url.pathname]) {
+    const page = findPage();
+    const file = page ? join(dirname(page), url.pathname.slice(1)) : '';
+    if (!file || !existsSync(file)) {
+      res.writeHead(404);
+      return res.end('not found');
+    }
+    res.writeHead(200, { 'content-type': STATIC[url.pathname], 'cache-control': url.pathname === '/sw.js' ? 'no-cache' : 'public, max-age=86400' });
+    return res.end(readFileSync(file));
   }
   if (url.pathname !== '/' && url.pathname !== '/index.html') {
     res.writeHead(404);
@@ -130,4 +168,10 @@ wss.on('connection', (ws) => {
   ws.on('pong', () => (ws.isAlive = true));
 });
 
-server.listen(PORT, () => console.log(`육각 전장: http://localhost:${PORT}`));
+server.listen(PORT, () => console.log(`Hexa: http://localhost:${PORT} (계정 저장: ${store.kind === 'postgres' ? 'Postgres' : process.env.DATA_FILE || 'data/hexa-db.json'})`));
+const bye = async () => {
+  await store.flush?.();
+  process.exit(0);
+};
+process.on('SIGTERM', bye);
+process.on('SIGINT', bye);

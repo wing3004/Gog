@@ -1,0 +1,19 @@
+{
+  "name": "Hexa",
+  "short_name": "Hexa",
+  "description": "여섯 세력이 중앙을 다투는 육각 타일 영토전",
+  "id": "/",
+  "start_url": "/?source=app",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "lang": "ko",
+  "background_color": "#0f141b",
+  "theme_color": "#0f141b",
+  "categories": ["games", "strategy"],
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

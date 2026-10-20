@@ -1,8 +1,15 @@
 services:
   - type: web
-    name: hexwar
+    name: hexa
     runtime: node
     plan: free
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /health
+    envVars:
+      # 계정·랭크를 저장할 Postgres 주소 (Neon 같은 무료 DB). 없으면 서버가 다시 켜질 때 계정이 지워진다
+      - key: DATABASE_URL
+        sync: false
+      # 안드로이드 앱(PWABuilder)으로 포장했을 때 받은 assetlinks.json 내용 (선택)
+      - key: ASSETLINKS_JSON
+        sync: false
