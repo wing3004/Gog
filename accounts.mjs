@@ -189,6 +189,21 @@ export async function openStore(here) {
 // ───────────── HTTP API ─────────────
 
 const NAME_RE = /^[0-9A-Za-z가-힣_]{2,12}$/;
+
+/**
+ * 요청한 사람의 IP. X-Forwarded-For 맨 앞 값은 누구나 써 넣을 수 있어(Render 프록시도 지우지 않고 뒤에 덧붙인다) 믿지 않는다.
+ * 프록시 뒤라면 TRUST_PROXY_HOPS(오른쪽에서 몇 번째가 실제 손님인지, Render 기본 2)만큼 오른쪽에서 센다. 아니면 연결한 주소
+ */
+export function clientIp(req, env = process.env) {
+  const hops = Number(env.TRUST_PROXY_HOPS ?? (env.RENDER ? 2 : 0));
+  const direct = String(req.socket?.remoteAddress || '');
+  if (!(hops > 0)) return direct;
+  const parts = String(req.headers['x-forwarded-for'] || '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+  return parts.length >= hops ? parts[parts.length - hops] : parts[0] || direct;
+}
 const ID_RE = /^[\w.:-]{4,80}$/;
 const sha = (t) => createHash('sha256').update(t).digest('hex');
 
@@ -213,9 +228,35 @@ export function accountsApi(store) {
     h.n++;
     return h.n > max;
   };
+  // 로그인 실패 한도 (10분): 같은 이름+IP는 8번, 이름 하나에는 IP가 달라도 모두 합쳐 30번.
+  // IP를 바꿔 가며 한 계정의 비밀번호를 맞혀 보지 못하게 하면서, 남이 틀린 시도로 내 로그인을 쉽게 막지는 못하게
+  const fails = new Map();
+  const over = (k, max) => {
+    const f = fails.get(k);
+    return !!f && Date.now() < f.reset && f.n >= max;
+  };
+  const failedTooOften = (key, ip) => over(`${key}|${ip}`, 8) || over(key, 30);
+  const bump = (k) => {
+    const now = Date.now();
+    const f = fails.get(k);
+    if (!f || now > f.reset) fails.set(k, { n: 1, reset: now + 10 * 60000 });
+    else f.n++;
+  };
+  const noteFail = (key, ip) => {
+    bump(`${key}|${ip}`);
+    bump(key);
+  };
+  // 서버 전체 비밀번호 계산(scrypt) 한도: 분당 300번
+  let scryptBudget = { n: 0, reset: 0 };
+  const scryptAllowed = () => {
+    const now = Date.now();
+    if (now > scryptBudget.reset) scryptBudget = { n: 0, reset: now + 60000 };
+    return ++scryptBudget.n <= 300;
+  };
   setInterval(() => {
     const now = Date.now();
     for (const [k, h] of hits) if (now > h.reset) hits.delete(k);
+    for (const [k, f] of fails) if (now > f.reset) fails.delete(k);
   }, 60000).unref?.();
 
   const send = (res, status, body) => {
@@ -229,9 +270,13 @@ export function accountsApi(store) {
       const chunks = [];
       req.on('data', (c) => {
         size += c.length;
-        if (size > 4096) req.destroy();
-        else chunks.push(c);
+        if (size > 4096) {
+          // 너무 크면 끊고 바로 끝낸다 (끊긴 요청의 end는 오지 않아 기다리던 처리가 남지 않게)
+          resolve(null);
+          req.destroy();
+        } else chunks.push(c);
       });
+      req.on('close', () => resolve(null));
       req.on('end', () => {
         try {
           resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
@@ -256,7 +301,7 @@ export function accountsApi(store) {
   /** 처리했으면 true */
   return async function handle(req, res, url) {
     if (!url.pathname.startsWith('/api/')) return false;
-    const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+    const ip = clientIp(req);
     try {
       if (req.method === 'OPTIONS') {
         res.writeHead(204, cors);
@@ -275,8 +320,12 @@ export function accountsApi(store) {
         const name = typeof b?.name === 'string' ? b.name.trim() : '';
         const password = typeof b?.password === 'string' ? b.password : '';
         if (!NAME_RE.test(name)) return send(res, 400, { error: '이름은 2~12자, 한글·영문·숫자·_만' }), true;
-        if (password.length < 4 || password.length > 72) return send(res, 400, { error: '비밀번호는 4~72자' }), true;
+        if (password.length > 72) return send(res, 400, { error: '비밀번호는 72자까지' }), true;
+        // 새 계정은 6자 이상 (예전 4자 계정도 로그인은 된다)
+        if (password.length < (path === '/api/register' ? 6 : 4)) return send(res, 400, { error: path === '/api/register' ? '비밀번호는 6자 이상' : '이름 또는 비밀번호가 맞지 않는다' }), true;
         const key = name.toLowerCase();
+        if (path === '/api/login' && failedTooOften(key, ip)) return send(res, 429, { error: '이 이름으로 틀린 시도가 많다. 10분 뒤에 다시' }), true;
+        if (!scryptAllowed()) return send(res, 503, { error: '서버가 바쁘다. 잠시 뒤에 다시' }), true;
         const found = await store.userByKey(key);
         if (path === '/api/register') {
           if (found) return send(res, 409, { error: '이미 있는 이름이다' }), true;
@@ -286,7 +335,11 @@ export function accountsApi(store) {
           return true;
         }
         const ok = found && timingSafeEqual(Buffer.from(await hashPassword(password, found.salt), 'hex'), Buffer.from(found.hash, 'hex'));
-        if (!ok) return send(res, 401, { error: '이름 또는 비밀번호가 맞지 않는다' }), true;
+        if (!ok) {
+          noteFail(key, ip);
+          return send(res, 401, { error: '이름 또는 비밀번호가 맞지 않는다' }), true;
+        }
+        fails.delete(`${key}|${ip}`);
         send(res, 200, { token: await newSession(found), profile: publicProfile(found) });
         return true;
       }
